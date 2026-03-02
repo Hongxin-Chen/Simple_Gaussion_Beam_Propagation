@@ -24,6 +24,17 @@ def main():
     
     # 显示说明
     with st.expander("📖 程序说明", expanded=False):
+        # 提供PDF下载链接
+        import os
+        pdf_path = os.path.join(os.path.dirname(__file__), "DerivationofGaussionBeam.pdf")
+        if os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as pdf_file:
+                st.download_button(
+                    label="📄下载高斯光束推导PDF",
+                    data=pdf_file,
+                    file_name="DerivationofGaussionBeam.pdf",
+                    mime="application/pdf"
+                )
         st.markdown("""
         ## 计算原理
         
