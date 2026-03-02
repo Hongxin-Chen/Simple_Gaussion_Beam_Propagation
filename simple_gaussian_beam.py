@@ -116,9 +116,9 @@ class SimpleGaussianBeam:
         """
         计算在传播距离z处的光斑半径 w(z)
         
-        公式: w(z) = w₀·M²·√[1 + ((z-z_waist)/z_R)²]
+        公式: w(z) = w₀·√[1 + ((z-z_waist)/z_R)²]
         
-        其中 z_R = π·w₀²/(λ·M²)
+        其中 z_R = π·w₀²/(λ·M²)，M²已包含在z_R中
         
         参数:
         z: 绝对位置坐标 (m)
@@ -126,7 +126,7 @@ class SimpleGaussianBeam:
         返回:
         w(z): 光斑半径 (m)
         """
-        return self.w0 * self.M2 * np.sqrt(1 + ((z - self.z_waist) / self.z_R)**2)
+        return self.w0 * np.sqrt(1 + ((z - self.z_waist) / self.z_R)**2)
     
     def wavefront_curvature(self, z):
         """
@@ -175,11 +175,14 @@ class SimpleGaussianBeam:
         return self.wavelength * self.M2 / (np.pi * self.w0)
     
     @staticmethod
-    def extract_beam_params(q, wavelength):
+    def extract_beam_params(q, wavelength, M2=1.0):
         """
         从q参数提取光束参数
         
-        公式: 1/q = 1/R - i·λ/(π·w²)
+        对于M²光束，q参数关系为:
+        1/q = 1/R - i·M²·λ/(π·w²)
+        
+        因此: w² = M²·λ / (π·|Im(1/q)|)
         
         返回:
         (w, R): 光斑半径和波前曲率半径
@@ -193,8 +196,8 @@ class SimpleGaussianBeam:
         else:
             R = 1 / real_part
         
-        # w² = λ / (π·|Im(1/q)|)
-        w_squared = wavelength / (np.pi * np.abs(np.imag(q_inv)))
+        # w² = M²·λ / (π·|Im(1/q)|)
+        w_squared = M2 * wavelength / (np.pi * np.abs(np.imag(q_inv)))
         w = np.sqrt(w_squared)
         return w, R
 
@@ -261,7 +264,7 @@ def calculate_beam_at_position(beam, lens_list, z_target):
     current_q = current_q + dz_final
     
     # 提取光束参数
-    w, R = beam.extract_beam_params(current_q, beam.wavelength)
+    w, R = beam.extract_beam_params(current_q, beam.wavelength, beam.M2)
     return w, R
 
 
@@ -328,8 +331,9 @@ def calculate_beam_regions(beam, lens_list):
         z_waist_absolute = lens_pos + z_waist_relative
         
         # 计算新束腰半径和瑞利长度
+        # 从 z_R = πw₀²/(λM²) 反解: w₀ = √(λ·M²·z_R/π)
         z_R_new = np.imag(q_after_lens)
-        w0_new = np.sqrt(beam.wavelength * z_R_new / (np.pi * beam.M2))
+        w0_new = np.sqrt(beam.wavelength * beam.M2 * z_R_new / np.pi)
         
         # 添加区域信息
         region_num = i - waist_region_idx + 1
@@ -367,8 +371,9 @@ def calculate_beam_regions(beam, lens_list):
         z_waist_absolute = lens_pos + z_waist_relative
         
         # 计算束腰半径和瑞利长度
+        # 从 z_R = πw₀²/(λM²) 反解: w₀ = √(λ·M²·z_R/π)
         z_R_new = np.imag(q_before_lens)
-        w0_new = np.sqrt(beam.wavelength * z_R_new / (np.pi * beam.M2))
+        w0_new = np.sqrt(beam.wavelength * beam.M2 * z_R_new / np.pi)
         
         # 添加区域信息
         region_num = -(waist_region_idx - i)
@@ -427,9 +432,9 @@ def calculate_waist_after_lens(beam, lens_list):
         z_waist_relative = -np.real(q_after_lens)
         z_waist_absolute = lens_pos + z_waist_relative
         
-        # 计算新束腰半径：在束腰处，w = sqrt(lambda * z_R / pi / M^2)
+        # 计算新束腰半径：从 z_R = πw₀²/(λM²) 反解: w₀ = √(λ·M²·z_R/π)
         z_R_new = np.imag(q_after_lens)
-        w0_new = np.sqrt(beam.wavelength * z_R_new / (np.pi * beam.M2))
+        w0_new = np.sqrt(beam.wavelength * beam.M2 * z_R_new / np.pi)
         
         waist_info.append({
             'lens_pos': lens_pos,
@@ -490,11 +495,11 @@ def plot_beam_evolution_interactive(beam, lens_list, z_max):
     fig.add_trace(
         go.Scatter(
             x=[0, z_max],
-            y=[beam.w0 * beam.M2 * 1e3, beam.w0 * beam.M2 * 1e3],
+            y=[beam.w0 * 1e3, beam.w0 * 1e3],
             mode='lines',
-            name=f'w₀·M² = {beam.w0*beam.M2*1e3:.3f} mm',
+            name=f'w₀ = {beam.w0*1e3:.3f} mm',
             line=dict(color='red', width=2, dash='dash'),
-            hovertemplate='w₀·M²: %{y:.3f} mm<extra></extra>'
+            hovertemplate='w₀: %{y:.3f} mm<extra></extra>'
         ),
         row=1, col=1
     )
@@ -747,11 +752,11 @@ def plot_beam_radius_interactive(beam, lens_list, z_max):
     # 添加束腰参考线
     fig.add_trace(go.Scatter(
         x=[0, z_max],
-        y=[beam.w0 * beam.M2 * 1e3, beam.w0 * beam.M2 * 1e3],
+        y=[beam.w0 * 1e3, beam.w0 * 1e3],
         mode='lines',
-        name=f'w₀·M² = {beam.w0*beam.M2*1e3:.3f} mm',
+        name=f'w₀ = {beam.w0*1e3:.3f} mm',
         line=dict(color='red', width=2, dash='dash'),
-        hovertemplate='w₀·M²: %{y:.3f} mm<extra></extra>'
+        hovertemplate='w₀: %{y:.3f} mm<extra></extra>'
     ))
     
     # 标记瑞利长度
