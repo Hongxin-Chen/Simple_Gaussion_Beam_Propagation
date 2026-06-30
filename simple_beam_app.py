@@ -3,6 +3,7 @@
 """
 
 import html
+import re
 from datetime import datetime
 import numpy as np
 import streamlit as st
@@ -18,6 +19,15 @@ from simple_gaussian_beam import (
     plot_curvature_interactive,
     plot_spot_intensity_row_interactive
 )
+
+
+def parse_position_list_cm(raw_text):
+    """Parse comma-separated cm positions, accepting both half/full-width commas."""
+    return [
+        float(item.strip())
+        for item in re.split(r'[,，]', raw_text)
+        if item.strip()
+    ]
 
 
 def inject_print_styles():
@@ -192,7 +202,8 @@ def render_print_summary(
     lens_list,
     lens_list_x,
     lens_list_y,
-    z_max_cm,
+    z_start_cm,
+    z_end_cm,
 ):
     """Render a print-only snapshot of the current sidebar configuration."""
     printed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -262,10 +273,11 @@ def render_print_summary(
             </table>
             <h3>系统设置</h3>
             <table>
-                <tr><th>波长 (nm)</th><th>最大传播距离 (cm)</th><th>X有效透镜数</th><th>Y有效透镜数</th></tr>
+                <tr><th>波长 (nm)</th><th>起始点 (cm)</th><th>终止点 (cm)</th><th>X有效透镜数</th><th>Y有效透镜数</th></tr>
                 <tr>
                     <td>{wavelength_nm:.1f}</td>
-                    <td>{z_max_cm:.2f}</td>
+                    <td>{z_start_cm:.2f}</td>
+                    <td>{z_end_cm:.2f}</td>
                     <td>{len(lens_list_x)}</td>
                     <td>{len(lens_list_y)}</td>
                 </tr>
@@ -462,72 +474,147 @@ def main():
         step=1.0
     )
     wavelength = wavelength_nm * 1e-9
-    
-    # X方向参数
-    st.sidebar.markdown('### X方向参数')
-    waist_position_x_cm = st.sidebar.number_input(
-        '束腰位置 z_waist_x (cm)',
-        min_value=-1000.0,
-        max_value=1000.0,
-        value=0.0,
-        step=0.1,
-        help='X方向束腰的绝对位置'
-    )
-    waist_position_x = waist_position_x_cm * 1e-2
-    
-    waist_diameter_x_mm = st.sidebar.number_input(
-        '束腰直径 D₀_x (mm)',
-        min_value=0.00002,
-        max_value=20.0,
-        value=0.2,
-        step=0.00001,
-        format="%.5f",
-        help='X方向在束腰处的光束直径（D₀ = 2w₀）'
-    )
-    w0_x = waist_diameter_x_mm / 2 * 1e-3
-    
-    M2_x = st.sidebar.number_input(
-        '光束质量因子 M²_x',
-        min_value=1.0,
-        max_value=10.0,
-        value=1.0,
-        step=0.001,
-        format="%.3f",
-        help='M²=1为理想高斯光束，M²>1为非理想光束'
-    )
-    
-    # Y方向参数
-    st.sidebar.markdown('### Y方向参数')
-    waist_position_y_cm = st.sidebar.number_input(
-        '束腰位置 z_waist_y (cm)',
-        min_value=-1000.0,
-        max_value=1000.0,
-        value=0.0,
-        step=0.1,
-        help='Y方向束腰的绝对位置'
-    )
-    waist_position_y = waist_position_y_cm * 1e-2
-    
-    waist_diameter_y_mm = st.sidebar.number_input(
-        '束腰直径 D₀_y (mm)',
-        min_value=0.00002,
-        max_value=20.0,
-        value=0.2,
-        step=0.00001,
-        format="%.5f",
-        help='Y方向在束腰处的光束直径（D₀ = 2w₀）'
-    )
-    w0_y = waist_diameter_y_mm / 2 * 1e-3
-    
-    M2_y = st.sidebar.number_input(
-        '光束质量因子 M²_y',
-        min_value=1.0,
-        max_value=10.0,
-        value=1.0,
-        step=0.001,
-        format="%.3f",
-        help='M²=1为理想高斯光束，M²>1为非理想光束'
-    )
+
+    # 默认圆光斑联动输入；用 Streamlit 原生开关切换为 X/Y 独立输入。
+    default_beam_state = {
+        'beam_common_waist_position_cm': 0.0,
+        'beam_common_waist_diameter_mm': 0.2,
+        'beam_common_M2': 1.0,
+        'beam_x_waist_position_cm': 0.0,
+        'beam_x_waist_diameter_mm': 0.2,
+        'beam_x_M2': 1.0,
+        'beam_y_waist_position_cm': 0.0,
+        'beam_y_waist_diameter_mm': 0.2,
+        'beam_y_M2': 1.0,
+    }
+    for state_key, state_value in default_beam_state.items():
+        if state_key not in st.session_state:
+            st.session_state[state_key] = state_value
+    if 'beam_xy_split' not in st.session_state:
+        st.session_state.beam_xy_split = False
+    if 'beam_xy_split_previous' not in st.session_state:
+        st.session_state.beam_xy_split_previous = st.session_state.beam_xy_split
+
+    beam_xy_split = st.sidebar.toggle('X/Y 独立输入', key='beam_xy_split')
+    if beam_xy_split != st.session_state.beam_xy_split_previous:
+        if beam_xy_split:
+            st.session_state.beam_x_waist_position_cm = st.session_state.beam_common_waist_position_cm
+            st.session_state.beam_y_waist_position_cm = st.session_state.beam_common_waist_position_cm
+            st.session_state.beam_x_waist_diameter_mm = st.session_state.beam_common_waist_diameter_mm
+            st.session_state.beam_y_waist_diameter_mm = st.session_state.beam_common_waist_diameter_mm
+            st.session_state.beam_x_M2 = st.session_state.beam_common_M2
+            st.session_state.beam_y_M2 = st.session_state.beam_common_M2
+        else:
+            st.session_state.beam_common_waist_position_cm = st.session_state.beam_x_waist_position_cm
+            st.session_state.beam_common_waist_diameter_mm = st.session_state.beam_x_waist_diameter_mm
+            st.session_state.beam_common_M2 = st.session_state.beam_x_M2
+        st.session_state.beam_xy_split_previous = beam_xy_split
+
+    if beam_xy_split:
+        # X方向参数
+        st.sidebar.markdown('### X方向参数')
+        waist_position_x_cm = st.sidebar.number_input(
+            '束腰位置 z_waist_x (cm)',
+            min_value=-2000.0,
+            max_value=2000.0,
+            step=0.1,
+            key='beam_x_waist_position_cm',
+            help='X方向束腰的绝对位置'
+        )
+        waist_position_x = waist_position_x_cm * 1e-2
+
+        waist_diameter_x_mm = st.sidebar.number_input(
+            '束腰直径 D₀_x (mm)',
+            min_value=0.00002,
+            max_value=20.0,
+            step=0.00001,
+            format="%.5f",
+            key='beam_x_waist_diameter_mm',
+            help='X方向在束腰处的光束直径（D₀ = 2w₀）'
+        )
+        w0_x = waist_diameter_x_mm / 2 * 1e-3
+
+        M2_x = st.sidebar.number_input(
+            '光束质量因子 M²_x',
+            min_value=1.0,
+            max_value=10.0,
+            step=0.001,
+            format="%.3f",
+            key='beam_x_M2',
+            help='M²=1为理想高斯光束，M²>1为非理想光束'
+        )
+
+        # Y方向参数
+        st.sidebar.markdown('### Y方向参数')
+        waist_position_y_cm = st.sidebar.number_input(
+            '束腰位置 z_waist_y (cm)',
+            min_value=-2000.0,
+            max_value=2000.0,
+            step=0.1,
+            key='beam_y_waist_position_cm',
+            help='Y方向束腰的绝对位置'
+        )
+        waist_position_y = waist_position_y_cm * 1e-2
+
+        waist_diameter_y_mm = st.sidebar.number_input(
+            '束腰直径 D₀_y (mm)',
+            min_value=0.00002,
+            max_value=20.0,
+            step=0.00001,
+            format="%.5f",
+            key='beam_y_waist_diameter_mm',
+            help='Y方向在束腰处的光束直径（D₀ = 2w₀）'
+        )
+        w0_y = waist_diameter_y_mm / 2 * 1e-3
+
+        M2_y = st.sidebar.number_input(
+            '光束质量因子 M²_y',
+            min_value=1.0,
+            max_value=10.0,
+            step=0.001,
+            format="%.3f",
+            key='beam_y_M2',
+            help='M²=1为理想高斯光束，M²>1为非理想光束'
+        )
+    else:
+        st.sidebar.markdown('### 共同参数')
+        waist_position_common_cm = st.sidebar.number_input(
+            '束腰位置 z_waist (cm)',
+            min_value=-2000.0,
+            max_value=2000.0,
+            step=0.1,
+            key='beam_common_waist_position_cm',
+            help='X/Y方向共用的束腰绝对位置'
+        )
+        waist_diameter_common_mm = st.sidebar.number_input(
+            '束腰直径 D₀ (mm)',
+            min_value=0.00002,
+            max_value=20.0,
+            step=0.00001,
+            format="%.5f",
+            key='beam_common_waist_diameter_mm',
+            help='X/Y方向共用的束腰直径（D₀ = 2w₀）'
+        )
+        M2_common = st.sidebar.number_input(
+            '光束质量因子 M²',
+            min_value=1.0,
+            max_value=10.0,
+            step=0.001,
+            format="%.3f",
+            key='beam_common_M2',
+            help='X/Y方向共用的M²参数'
+        )
+
+        waist_position_x_cm = waist_position_common_cm
+        waist_position_y_cm = waist_position_common_cm
+        waist_position_x = waist_position_x_cm * 1e-2
+        waist_position_y = waist_position_y_cm * 1e-2
+        waist_diameter_x_mm = waist_diameter_common_mm
+        waist_diameter_y_mm = waist_diameter_common_mm
+        w0_x = waist_diameter_x_mm / 2 * 1e-3
+        w0_y = waist_diameter_y_mm / 2 * 1e-3
+        M2_x = M2_common
+        M2_y = M2_common
     
     # 创建X和Y方向的光束
     beam_x = SimpleGaussianBeam(wavelength, w0_x, M2_x, waist_position_x)
@@ -564,8 +651,8 @@ def main():
         
         lens_position_cm = st.sidebar.number_input(
             f'透镜位置 (cm)',
-            min_value=0.1,
-            max_value=1000.0,
+            min_value=-2000.0,
+            max_value=2000.0,
             value=10.0 * (i + 1),
             step=0.1,
             key=f'lens_pos_{i}'
@@ -618,18 +705,31 @@ def main():
     lens_list_x = filter_lenses_by_direction(lens_list, 'x')
     lens_list_y = filter_lenses_by_direction(lens_list, 'y')
     
-    # 侧边栏: 传播距离
+    # 侧边栏: 传播范围
     st.sidebar.markdown('---')
-    st.sidebar.header('传播距离')
+    st.sidebar.header('传播范围')
     
-    z_max_cm = st.sidebar.number_input(
-        '最大传播距离 (cm)',
-        min_value=1.0,
+    z_start_cm = st.sidebar.number_input(
+        '起始点 (cm)',
+        min_value=-2000.0,
+        max_value=2000.0,
+        value=0.0,
+        step=1.0
+    )
+    z_end_cm = st.sidebar.number_input(
+        '终止点 (cm)',
+        min_value=-2000.0,
         max_value=2000.0,
         value=50.0,
         step=1.0
     )
-    z_max = z_max_cm * 1e-2
+    if z_end_cm <= z_start_cm:
+        st.sidebar.error('终止点必须大于起始点。')
+        st.stop()
+
+    z_min = z_start_cm * 1e-2
+    z_max = z_end_cm * 1e-2
+    z_span = z_max - z_min
 
     st.sidebar.markdown('---')
     with st.sidebar:
@@ -648,12 +748,13 @@ def main():
         lens_list,
         lens_list_x,
         lens_list_y,
-        z_max_cm,
+        z_start_cm,
+        z_end_cm,
     )
     
     # 绘制二维光束包络图
     with st.spinner('正在生成包络图...'):
-        fig_envelope = plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max)
+        fig_envelope = plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max, z_min=z_min)
         st.plotly_chart(fig_envelope, use_container_width=True)
     
     # 各区域高斯光束参数
@@ -663,8 +764,8 @@ def main():
     st.markdown(f'**X方向受{len(lens_list_x)}个透镜影响，Y方向受{len(lens_list_y)}个透镜影响；每个方向按其有效透镜独立分区。**')
     
     # 计算X和Y方向的区域信息
-    regions_x = calculate_beam_regions(beam_x, lens_list_x)
-    regions_y = calculate_beam_regions(beam_y, lens_list_y)
+    regions_x = calculate_beam_regions(beam_x, lens_list_x, z_min, z_max)
+    regions_y = calculate_beam_regions(beam_y, lens_list_y, z_min, z_max)
     
     col_x, col_y = st.columns(2)
     
@@ -713,17 +814,19 @@ def main():
 
     # 特定位置光斑参数查询
     st.markdown('---')
-    st.header('📍 特定位置光斑参数查询')
+    st.header('📍 特定位置光斑快照')
 
     z_query_input = st.text_input(
         '输入查询位置 (cm)，多个位置用逗号分隔',
         value='10, 20, 30',
-        help='例如: 10, 20, 30'
+        help='例如: 10, 20, 30 或 10，20，30'
     )
 
     if z_query_input:
         try:
-            z_positions_cm = [float(z.strip()) for z in z_query_input.split(',')]
+            z_positions_cm = parse_position_list_cm(z_query_input)
+            if not z_positions_cm:
+                raise ValueError
             z_positions = [z * 1e-2 for z in z_positions_cm]  # cm -> m
 
             # 创建查询结果表格
@@ -734,8 +837,8 @@ def main():
                 w_y, R_y = calculate_beam_at_position(beam_y, lens_list_y, z_m)
 
                 # 处理无穷大的曲率半径
-                R_x_str = '∞' if np.isinf(R_x) or np.abs(R_x) > z_max * 10 else f'{R_x:.4f}'
-                R_y_str = '∞' if np.isinf(R_y) or np.abs(R_y) > z_max * 10 else f'{R_y:.4f}'
+                R_x_str = '∞' if np.isinf(R_x) or np.abs(R_x) > z_span * 10 else f'{R_x:.4f}'
+                R_y_str = '∞' if np.isinf(R_y) or np.abs(R_y) > z_span * 10 else f'{R_y:.4f}'
 
                 query_data.append({
                     'z位置 (cm)': f'{z_cm:.2f}',
@@ -754,7 +857,6 @@ def main():
             df_query = pd.DataFrame(query_data)
             st.dataframe(df_query, use_container_width=True)
 
-            st.subheader('2D光斑强度分布')
             spot_extent_mm = 3 * max(
                 max(item['w_x'], item['w_y']) * 1e3 for item in spot_data
             )
@@ -765,7 +867,7 @@ def main():
             st.plotly_chart(fig_spots, use_container_width=True)
 
         except ValueError:
-            st.error('请输入有效的数字，多个位置用逗号分隔')
+            st.error('请输入有效的数字，多个位置可用英文逗号或中文逗号分隔')
 
     # 绘制曲率演化图
     st.markdown('<div class="print-page-break"></div>', unsafe_allow_html=True)
@@ -781,9 +883,9 @@ def main():
 
     with st.spinner('正在生成曲率图...'):
         if direction == 'X方向':
-            fig_curvature = plot_curvature_interactive(beam_x, lens_list, z_max, direction='X')
+            fig_curvature = plot_curvature_interactive(beam_x, lens_list, z_max, direction='X', z_min=z_min)
         else:
-            fig_curvature = plot_curvature_interactive(beam_y, lens_list, z_max, direction='Y')
+            fig_curvature = plot_curvature_interactive(beam_y, lens_list, z_max, direction='Y', z_min=z_min)
         st.plotly_chart(fig_curvature, use_container_width=True)
 
 

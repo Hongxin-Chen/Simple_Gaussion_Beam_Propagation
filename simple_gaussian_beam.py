@@ -224,18 +224,9 @@ def lens_axis_label(lens):
     return 'X/Y'
 
 
-def calculate_beam_at_position(beam, lens_list, z_target):
+def calculate_q_at_position(beam, lens_list, z_target):
     """
-    计算在目标位置z_target处的光束参数（光斑半径和曲率半径）
-    支持任意束腰位置和双向传播
-    
-    参数:
-    beam: SimpleGaussianBeam对象
-    lens_list: 透镜列表，每个元素包含 {'position': z_pos, 'f': focal_length, 'type': 'converging'/'diverging'}
-    z_target: 目标位置 (m)
-    
-    返回:
-    (w, R): 光斑半径和波前曲率半径
+    计算在目标位置 z_target 处的 q 参数，支持任意束腰位置和双向传播。
     """
     # 初始q参数（在束腰处）
     q_at_waist = 1j * beam.z_R
@@ -284,134 +275,80 @@ def calculate_beam_at_position(beam, lens_list, z_target):
     # 最后传播到目标位置
     dz_final = z_target - current_z
     current_q = current_q + dz_final
+
+    return current_q
+
+
+def calculate_beam_at_position(beam, lens_list, z_target):
+    """
+    计算在目标位置z_target处的光束参数（光斑半径和曲率半径）
+    支持任意束腰位置和双向传播
     
+    参数:
+    beam: SimpleGaussianBeam对象
+    lens_list: 透镜列表，每个元素包含 {'position': z_pos, 'f': focal_length, 'type': 'converging'/'diverging'}
+    z_target: 目标位置 (m)
+    
+    返回:
+    (w, R): 光斑半径和波前曲率半径
+    """
+    current_q = calculate_q_at_position(beam, lens_list, z_target)
+
     # 提取光束参数
     w, R = beam.extract_beam_params(current_q, beam.wavelength, beam.M2)
     return w, R
 
 
-def calculate_beam_regions(beam, lens_list):
+def calculate_beam_regions(beam, lens_list, z_min=None, z_max=None):
     """
-    计算每个区域的高斯光束参数
-    N个透镜将空间分为N+1个区域，每个区域都是一个高斯光束
-    区域编号：包含初始束腰的区域为区域0，向前为负，向后为正
+    计算显示窗口内每个传播区域的等效高斯光束参数。
     
     参数:
     beam: SimpleGaussianBeam对象
     lens_list: 透镜列表
+    z_min: 显示窗口起点 (m)
+    z_max: 显示窗口终点 (m)
     
     返回:
     list of dict: 每个区域的光束信息 [{'region': i, 'waist_pos': z, 'waist_radius': w0, 'z_R': zR}]
     """
-    # 按位置排序透镜
-    sorted_lenses = sorted(lens_list, key=lambda x: x['position'])
-    
-    # 创建所有区域的边界
-    boundaries = [0] + [lens['position'] for lens in sorted_lenses] + [float('inf')]
-    
-    # 找到初始束腰所在的区域索引
-    waist_region_idx = 0
-    for i in range(len(boundaries) - 1):
-        if boundaries[i] <= beam.z_waist < boundaries[i + 1]:
-            waist_region_idx = i
-            break
-    
-    # 初始q参数（在束腰处）
-    q_at_waist = 1j * beam.z_R
-    
-    all_regions = []
-    
-    # 1. 先计算包含束腰的区域（区域0）
-    all_regions.append({
-        'region': 0,
-        'start_z': boundaries[waist_region_idx],
-        'end_z': boundaries[waist_region_idx + 1],
-        'waist_pos': beam.z_waist,
-        'waist_radius': beam.w0,
-        'z_R': beam.z_R
-    })
-    
-    # 2. 向后传播（区域1, 2, 3...）
-    current_z = beam.z_waist
-    current_q = q_at_waist
-    
-    for i in range(waist_region_idx, len(sorted_lenses)):
-        lens = sorted_lenses[i]
-        lens_pos = lens['position']
-        
-        # 传播到透镜
-        dz_to_lens = lens_pos - current_z
-        current_q = current_q + dz_to_lens
-        
-        # 通过透镜
-        M = np.array([[1, 0], [-1/lens['f'], 1]])
-        A, B, C, D = M[0, 0], M[0, 1], M[1, 0], M[1, 1]
-        q_after_lens = (A * current_q + B) / (C * current_q + D)
-        
-        # 计算新束腰位置
-        z_waist_relative = -np.real(q_after_lens)
-        z_waist_absolute = lens_pos + z_waist_relative
-        
-        # 计算新束腰半径和瑞利长度
-        # 从 z_R = πw₀²/(λM²) 反解: w₀ = √(λ·M²·z_R/π)
-        z_R_new = np.imag(q_after_lens)
-        w0_new = np.sqrt(beam.wavelength * beam.M2 * z_R_new / np.pi)
-        
-        # 添加区域信息
-        region_num = i - waist_region_idx + 1
-        all_regions.append({
-            'region': region_num,
-            'start_z': lens_pos,
-            'end_z': boundaries[i + 2] if i + 2 < len(boundaries) else float('inf'),
-            'waist_pos': z_waist_absolute,
-            'waist_radius': w0_new,
-            'z_R': z_R_new
+    if z_min is None:
+        z_min = min(0.0, beam.z_waist)
+    if z_max is None:
+        z_max = float('inf')
+
+    visible_lenses = [
+        lens for lens in sorted(lens_list, key=lambda x: x['position'])
+        if z_min < lens['position'] < z_max
+    ]
+    boundaries = [z_min] + [lens['position'] for lens in visible_lenses] + [z_max]
+
+    regions = []
+    for idx in range(len(boundaries) - 1):
+        start_z = boundaries[idx]
+        end_z = boundaries[idx + 1]
+        if end_z <= start_z:
+            continue
+        if np.isinf(end_z):
+            ref_z = start_z + max(beam.z_R, 1e-6)
+        else:
+            ref_z = (start_z + end_z) / 2
+
+        q_ref = calculate_q_at_position(beam, lens_list, ref_z)
+        z_R_region = max(np.imag(q_ref), 1e-18)
+        waist_pos = ref_z - np.real(q_ref)
+        waist_radius = np.sqrt(beam.wavelength * beam.M2 * z_R_region / np.pi)
+
+        regions.append({
+            'region': idx,
+            'start_z': start_z,
+            'end_z': end_z,
+            'waist_pos': waist_pos,
+            'waist_radius': waist_radius,
+            'z_R': z_R_region
         })
-        
-        current_q = q_after_lens
-        current_z = lens_pos
-    
-    # 3. 向前反向传播（区域-1, -2, -3...）
-    current_z = beam.z_waist
-    current_q = q_at_waist
-    
-    for i in range(waist_region_idx - 1, -1, -1):
-        lens = sorted_lenses[i]
-        lens_pos = lens['position']
-        
-        # 反向传播到透镜
-        dz_to_lens = lens_pos - current_z  # 这是负值
-        current_q = current_q + dz_to_lens
-        
-        # 反向通过透镜（使用逆矩阵）
-        M = np.array([[1, 0], [1/lens['f'], 1]])
-        A, B, C, D = M[0, 0], M[0, 1], M[1, 0], M[1, 1]
-        q_before_lens = (A * current_q + B) / (C * current_q + D)
-        
-        # 计算这个区域的束腰位置
-        z_waist_relative = -np.real(q_before_lens)
-        z_waist_absolute = lens_pos + z_waist_relative
-        
-        # 计算束腰半径和瑞利长度
-        # 从 z_R = πw₀²/(λM²) 反解: w₀ = √(λ·M²·z_R/π)
-        z_R_new = np.imag(q_before_lens)
-        w0_new = np.sqrt(beam.wavelength * beam.M2 * z_R_new / np.pi)
-        
-        # 添加区域信息
-        region_num = -(waist_region_idx - i)
-        all_regions.insert(0, {
-            'region': region_num,
-            'start_z': boundaries[i],
-            'end_z': lens_pos,
-            'waist_pos': z_waist_absolute,
-            'waist_radius': w0_new,
-            'z_R': z_R_new
-        })
-        
-        current_q = q_before_lens
-        current_z = lens_pos
-    
-    return all_regions
+
+    return regions
 
 
 def calculate_waist_after_lens(beam, lens_list):
@@ -579,10 +516,10 @@ def plot_beam_evolution_interactive(beam, lens_list, z_max):
     return fig
 
 
-def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
+def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max, z_min=0.0):
     """绘制交互式二维光束包络图，上半部分显示Y方向，下半部分显示X方向"""
     # 创建z轴数组
-    z_points_m = np.linspace(0, z_max, 2000)
+    z_points_m = np.linspace(z_min, z_max, 2000)
     z_points = z_points_m * 1e2  # 转换为cm
     lens_list_x = filter_lenses_by_direction(lens_list, 'x')
     lens_list_y = filter_lenses_by_direction(lens_list, 'y')
@@ -648,7 +585,7 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
     
     # 标记束腰位置
     # X方向束腰
-    if 0 <= beam_x.z_waist <= z_max:
+    if z_min <= beam_x.z_waist <= z_max:
         fig.add_vline(
             x=beam_x.z_waist * 1e2,
             line_dash="dash",
@@ -658,7 +595,7 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
         )
     
     # Y方向束腰
-    if 0 <= beam_y.z_waist <= z_max:
+    if z_min <= beam_y.z_waist <= z_max:
         fig.add_vline(
             x=beam_y.z_waist * 1e2,
             line_dash="dash",
@@ -669,6 +606,8 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
     
     # 标记透镜位置
     for lens in lens_list:
+        if not (z_min <= lens['position'] <= z_max):
+            continue
         if lens['type'] == 'converging':
             lens_type = 'Convex'
             lens_color = 'rgba(255, 140, 0, 0.9)'
@@ -705,7 +644,7 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
         ))
     
     # 添加区域标注：Y方向标在上半轴，X方向标在下半轴，避免柱透镜时看反。
-    z_all_samples = np.linspace(0, z_max, 200)
+    z_all_samples = np.linspace(z_min, z_max, 200)
     max_w_x_global = 0.0
     max_w_y_global = 0.0
     for z_sample in z_all_samples:
@@ -719,11 +658,11 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
 
     def add_region_annotations(regions, y_pos, label_prefix):
         for region_info in regions:
-            start_z = region_info['start_z']
-            end_z = z_max if np.isinf(region_info['end_z']) else region_info['end_z']
-            center_z = (start_z + end_z) / 2
-            if center_z > z_max:
+            start_z = max(region_info['start_z'], z_min)
+            end_z = z_max if np.isinf(region_info['end_z']) else min(region_info['end_z'], z_max)
+            if end_z <= z_min or start_z >= z_max or end_z <= start_z:
                 continue
+            center_z = (start_z + end_z) / 2
             fig.add_annotation(
                 x=center_z * 1e2,
                 y=y_pos,
@@ -736,8 +675,8 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
                 borderwidth=1
             )
 
-    add_region_annotations(calculate_beam_regions(beam_y, lens_list_y), y_region_y, 'Y')
-    add_region_annotations(calculate_beam_regions(beam_x, lens_list_x), x_region_y, 'X')
+    add_region_annotations(calculate_beam_regions(beam_y, lens_list_y, z_min, z_max), y_region_y, 'Y')
+    add_region_annotations(calculate_beam_regions(beam_x, lens_list_x, z_min, z_max), x_region_y, 'X')
     
     # 更新布局
     fig.update_layout(
@@ -887,15 +826,16 @@ def plot_beam_radius_interactive(beam, lens_list, z_max):
     return fig
 
 
-def plot_curvature_interactive(beam, lens_list, z_max, direction='X'):
+def plot_curvature_interactive(beam, lens_list, z_max, direction='X', z_min=0.0):
     """绘制交互式波前曲率演化图"""
     # Curvature jumps at thin lenses, so draw each propagation region separately.
     active_lenses = filter_lenses_by_direction(lens_list, direction)
     active_positions = sorted(
-        lens['position'] for lens in active_lenses if 0 < lens['position'] < z_max
+        lens['position'] for lens in active_lenses if z_min < lens['position'] < z_max
     )
-    boundaries = [0.0] + active_positions + [z_max]
-    eps = max(z_max * 1e-6, 1e-9)
+    boundaries = [z_min] + active_positions + [z_max]
+    z_span = max(z_max - z_min, 1e-9)
+    eps = max(z_span * 1e-6, 1e-9)
 
     segments = []
     all_R_values = []
@@ -922,11 +862,11 @@ def plot_curvature_interactive(beam, lens_list, z_max, direction='X'):
         finite_abs_R = np.abs(np.array(all_R_values))
         clip_limit = max(
             np.nanpercentile(finite_abs_R, 98),
-            z_max * 5,
+            z_span * 5,
             beam.z_R * 5,
         )
     else:
-        clip_limit = z_max * 5
+        clip_limit = z_span * 5
 
     # 根据方向选择颜色
     line_color = 'blue' if direction == 'X' else 'red'
@@ -951,6 +891,8 @@ def plot_curvature_interactive(beam, lens_list, z_max, direction='X'):
     
     # 标记透镜位置
     for lens in sorted(lens_list, key=lambda x: x['position']):
+        if not (z_min <= lens['position'] <= z_max):
+            continue
         is_active = lens_affects_direction(lens, direction)
         if lens['type'] == 'converging':
             lens_type = '凸透镜'
