@@ -2,122 +2,454 @@
 简化高斯光束ABCD矩阵计算器 - Streamlit界面
 """
 
+import html
+from datetime import datetime
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from simple_gaussian_beam import (
     SimpleLensSystem,
     SimpleGaussianBeam,
     calculate_beam_at_position,
     calculate_beam_regions,
+    filter_lenses_by_direction,
     plot_beam_envelope_interactive,
-    plot_curvature_interactive
+    plot_curvature_interactive,
+    plot_spot_intensity_row_interactive
 )
+
+
+def inject_print_styles():
+    """Keep printed/PDF output focused on the current results."""
+    st.markdown(
+        """
+        <style>
+        .print-only {
+            display: none;
+        }
+
+        .print-page-break {
+            display: none;
+        }
+
+        @media print {
+            @page {
+                margin: 12mm;
+            }
+
+            html, body, .stApp {
+                background: #ffffff !important;
+            }
+
+            header,
+            footer,
+            [data-testid="stSidebar"],
+            [data-testid="stToolbar"],
+            [data-testid="stDecoration"],
+            [data-testid="stStatusWidget"],
+            [data-testid="stTextInput"],
+            [data-testid="stRadio"],
+            button,
+            iframe[title="streamlit.components.v1.html"] {
+                display: none !important;
+            }
+
+            [data-testid="stAppViewContainer"] .main .block-container {
+                max-width: 100% !important;
+                padding: 0 !important;
+            }
+
+            [data-testid="stPlotlyChart"],
+            [data-testid="stDataFrame"] {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+
+            .print-only {
+                display: block !important;
+                margin: 0 0 16px 0;
+            }
+
+            .print-timestamp {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 11px;
+                color: #4b5563;
+                text-align: right;
+                margin: 0 0 8px 0;
+            }
+
+            .print-page-break {
+                display: block !important;
+                break-before: page;
+                page-break-before: always;
+                height: 0;
+                margin: 0;
+                padding: 0;
+            }
+
+            .print-summary {
+                border: 1px solid #d8dee4;
+                border-radius: 6px;
+                padding: 12px 14px;
+                margin-bottom: 18px;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                color: #111827;
+            }
+
+            .print-summary h2 {
+                font-size: 18px;
+                margin: 0 0 10px 0;
+            }
+
+            .print-summary h3 {
+                font-size: 13px;
+                margin: 12px 0 6px 0;
+            }
+
+            .print-summary table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 11px;
+            }
+
+            .print-summary th,
+            .print-summary td {
+                border: 1px solid #d8dee4;
+                padding: 5px 6px;
+                text-align: left;
+            }
+
+            .print-summary th {
+                background: #f6f8fa;
+                font-weight: 600;
+            }
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_print_button():
+    """Render a small browser-print button for saving the current view as PDF."""
+    components.html(
+        """
+        <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        button {
+            width: 100%;
+            min-height: 38px;
+            border: 1px solid rgba(49, 51, 63, 0.2);
+            border-radius: 6px;
+            background: #ffffff;
+            color: rgb(49, 51, 63);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+
+        button:hover {
+            border-color: rgb(255, 75, 75);
+            color: rgb(255, 75, 75);
+        }
+        </style>
+        <button
+            type="button"
+            onclick="
+                const doc = window.parent.document;
+                const originalTitle = doc.title;
+                doc.title = '\u200b';
+                window.parent.focus();
+                setTimeout(() => {
+                    window.parent.print();
+                    setTimeout(() => { doc.title = originalTitle; }, 500);
+                }, 50);
+            "
+        >
+            打印PDF
+        </button>
+        """,
+        height=42,
+    )
+
+
+def render_print_summary(
+    wavelength_nm,
+    waist_position_x_cm,
+    waist_diameter_x_mm,
+    M2_x,
+    beam_x,
+    waist_position_y_cm,
+    waist_diameter_y_mm,
+    M2_y,
+    beam_y,
+    lens_list,
+    lens_list_x,
+    lens_list_y,
+    z_max_cm,
+):
+    """Render a print-only snapshot of the current sidebar configuration."""
+    printed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def axis_label(axis):
+        return {
+            'both': '普通薄透镜（X/Y）',
+            'x': '柱透镜（仅作用X方向）',
+            'y': '柱透镜（仅作用Y方向）',
+        }.get(axis, '普通薄透镜（X/Y）')
+
+    def power_label(lens_type):
+        return '会聚' if lens_type == 'converging' else '发散'
+
+    lens_rows = []
+    for idx, lens in enumerate(lens_list, start=1):
+        lens_rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{lens['position'] * 1e2:.2f}</td>"
+            f"<td>{lens['f'] * 1e3:.2f}</td>"
+            f"<td>{html.escape(power_label(lens['type']))}</td>"
+            f"<td>{html.escape(axis_label(lens.get('axis', 'both')))}</td>"
+            "</tr>"
+        )
+
+    if not lens_rows:
+        lens_rows.append("<tr><td colspan='5'>无透镜</td></tr>")
+
+    st.markdown(
+        f"""
+        <div class="print-only print-timestamp">打印时间：{printed_at}</div>
+        <div class="print-only print-summary">
+            <h2>当前计算参数</h2>
+            <h3>光束参数</h3>
+            <table>
+                <tr>
+                    <th>参数</th>
+                    <th>X方向</th>
+                    <th>Y方向</th>
+                </tr>
+                <tr>
+                    <td>束腰位置 (cm)</td>
+                    <td>{waist_position_x_cm:.2f}</td>
+                    <td>{waist_position_y_cm:.2f}</td>
+                </tr>
+                <tr>
+                    <td>束腰直径 (mm)</td>
+                    <td>{waist_diameter_x_mm:.5f}</td>
+                    <td>{waist_diameter_y_mm:.5f}</td>
+                </tr>
+                <tr>
+                    <td>M²</td>
+                    <td>{M2_x:.3f}</td>
+                    <td>{M2_y:.3f}</td>
+                </tr>
+                <tr>
+                    <td>瑞利长度 z_R (cm)</td>
+                    <td>{beam_x.z_R * 1e2:.2f}</td>
+                    <td>{beam_y.z_R * 1e2:.2f}</td>
+                </tr>
+                <tr>
+                    <td>发散全角 (mrad)</td>
+                    <td>{beam_x.divergence_angle() * 2 * 1e3:.4f}</td>
+                    <td>{beam_y.divergence_angle() * 2 * 1e3:.4f}</td>
+                </tr>
+            </table>
+            <h3>系统设置</h3>
+            <table>
+                <tr><th>波长 (nm)</th><th>最大传播距离 (cm)</th><th>X有效透镜数</th><th>Y有效透镜数</th></tr>
+                <tr>
+                    <td>{wavelength_nm:.1f}</td>
+                    <td>{z_max_cm:.2f}</td>
+                    <td>{len(lens_list_x)}</td>
+                    <td>{len(lens_list_y)}</td>
+                </tr>
+            </table>
+            <h3>透镜列表</h3>
+            <table>
+                <tr>
+                    <th>#</th>
+                    <th>位置 (cm)</th>
+                    <th>焦距 (mm)</th>
+                    <th>焦度</th>
+                    <th>作用方向</th>
+                </tr>
+                {''.join(lens_rows)}
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+@st.dialog("高斯光束的传播", width="large")
+def show_program_notes():
+    """Show the theory notes in a compact dialog."""
+
+    # ---------- 1. 表达式 ----------
+    st.markdown("### ● 高斯光束表达式")
+    st.markdown(
+        "傍轴近似下，基模高斯光束的复振幅为"
+    )
+    st.latex(
+        r"E(r,z) = "
+        r"E_0\frac{w_0}{w(z)}\;"
+        r"\exp\!\left[-\frac{r^2}{w^2(z)}\right]\;"
+        r"\exp\!\left[-i\left(kz + \frac{kr^2}{2R(z)} - \psi(z)\right)\right]"
+    )
+    st.markdown(
+        "- **$E_0\\,w_0/w(z)$**：峰值振幅。光束展宽时下降，总功率不变。\n"
+        "- **$\\exp[-r^2/w^2(z)]$**：横向场包络为高斯函数，$w(z)$ 为场振幅 $1/e$ 半径。\n"
+        "- **$\\exp(-ikz)$**：沿 $z$ 轴的平面波传播相位。\n"
+        "- **$\\exp[-ikr^2/(2R(z))]$**：波前弯曲的二次相位，$R(z)$ 为曲率半径。\n"
+        "- **$\\exp[i\\psi(z)]$**：Gouy 相移，光束穿过束腰附近时额外积累的相位。"
+    )
+
+    # ---------- 2. 强度 ----------
+    st.markdown("### ● 强度分布与像散光束")
+    st.markdown(
+        "实验中测量的是强度 $I = |E|^2$："
+    )
+    st.latex(
+        r"I(r,z) = I_0\left(\frac{w_0}{w(z)}\right)^2 "
+        r"\exp\!\left[-\frac{2r^2}{w^2(z)}\right]"
+    )
+    st.markdown(
+        "对像散光束或柱透镜系统，$x$、$y$ 方向独立描述："
+    )
+    st.latex(
+        r"\frac{I(x,y,z)}{I_0} = "
+        r"\exp\!\left[-2\left(\frac{x^2}{w_x^2(z)} + \frac{y^2}{w_y^2(z)}\right)\right]"
+    )
+
+    # ---------- 3. 关键参数 ----------
+    st.markdown("### ● 光束半径、曲率与发散角")
+
+    st.markdown("光束半径沿传播方向的演化：")
+    st.latex(r"w(z) = w_0\sqrt{1 + \left(\frac{z - z_0}{z_R}\right)^2}")
+
+    st.markdown("瑞利长度——束腰到光斑半径扩大 $\\sqrt{2}$ 倍的距离：")
+    st.latex(r"\boxed{\ z_R = \frac{\pi w_0^2}{\lambda M^2}\ }")
+
+    st.markdown("波前曲率半径：")
+    st.latex(
+        r"R(z) = (z - z_0)\left[1 + \left(\frac{z_R}{z - z_0}\right)^2\right]"
+    )
+    st.markdown(
+        "束腰处 $R \\to \\infty$（波前为平面）；"
+        "远场 $|z - z_0| \\gg z_R$ 时 $R \\approx z - z_0$（趋近球面波）。"
+    )
+
+    st.markdown("远场发散半角：")
+    st.latex(r"\boxed{\ \theta = \frac{\lambda M^2}{\pi w_0}\ }")
+
+    st.caption(
+        "**为什么束腰越小越发散？**  \n"
+        "**从波动学观点看：** 光束被压得越窄，横向振幅分布越陡，"
+        "光场相邻位置之间的差异越大。自由空间中的衍射正是这种横向不均匀性"
+        "在传播中被展开的结果，因此束腰越小，展开得越快。  \n"
+        "**从角谱观点看：** 一个很窄的光斑必须由很多不同倾角的平面波叠加出来。"
+        "束腰 $w_0$ 越小，需要的倾角范围越宽；这些倾斜分量继续向前传播时，"
+        "就会表现为更大的发散角。$z_R$ 正是衡量这一扩散尺度的特征长度。"
+    )
+
+    # ---------- 4. q 参数 ----------
+    st.markdown("### ● q 参数：宽度与曲率的复化")
+
+    st.markdown(
+        "如果每次经过自由空间或透镜都分别追踪 $w(z)$ 和 $R(z)$，计算会很繁琐。"
+        "q 参数把它们打包成一个复数："
+    )
+    st.latex(r"\boxed{\ q(z) = (z - z_0) + i\,z_R\ }")
+
+    st.markdown("它与 $w$、$R$ 的关系为")
+    st.latex(
+        r"\frac{1}{q(z)} = \frac{1}{R(z)} - i\,\frac{M^2\lambda}{\pi w^2(z)}"
+    )
+    st.markdown("反过来，从 $q$ 直接读出：")
+    st.latex(
+        r"w(z) = \sqrt{\frac{M^2\lambda}{\pi\,|\operatorname{Im}(1/q)|}}, \qquad "
+        r"R(z) = \frac{1}{\operatorname{Re}(1/q)}"
+    )
+    st.markdown(
+        "束腰处 $\\operatorname{Re}(1/q) = 0$，$R \\to \\infty$，波前为平面。"
+    )
+
+    # ---------- 5. ABCD 矩阵 ----------
+    st.markdown("### ● ABCD 矩阵与 q 变换")
+
+    st.markdown(
+        "傍轴光学系统中，每个元件可用一个 $2 \\times 2$ 矩阵表示。"
+        "自由传播和薄透镜不需要重新求解波动方程，直接用矩阵对 $q$ 做线性分式变换即可。"
+    )
+    st.latex(r"M = \begin{pmatrix}A & B \\ C & D\end{pmatrix}")
+
+    st.markdown("q 参数的变换律：")
+    st.latex(r"\boxed{\ q_{\text{out}} = \frac{A\,q_{\text{in}} + B}{C\,q_{\text{in}} + D}\ }")
+
+    st.markdown("本程序用到两个基本矩阵：")
+    st.latex(
+        r"M_{\text{自由传播}}(d) = \begin{pmatrix}1 & d \\ 0 & 1\end{pmatrix}, \qquad "
+        r"M_{\text{薄透镜}}(f) = \begin{pmatrix}1 & 0 \\ -1/f & 1\end{pmatrix}"
+    )
+    st.markdown(
+        "- **自由传播**：$q$ 的实部随距离推进，描述衍射导致的光束展宽和波前弯曲。\n"
+        "- **薄透镜**：对波前施加二次相位（$\\propto r^2/f$），改变后续聚焦或发散行为。\n"
+        "- **柱透镜**：只在一个横向方向施加焦度，因此仅影响 $q_x$ 或 $q_y$。"
+    )
+
+
+@st.dialog("V2.0 更新说明（2026.6.30）", width="large")
+def show_update_notes():
+    """Show release notes in a readable dialog."""
+    st.markdown(
+        "**1. 增加柱透镜模块**  \n"
+        "透镜可选择同时作用于 X/Y，或仅作用于 X、Y 单一方向。"
+    )
+    st.markdown(
+        "**2. 新增特定点光斑图**  \n"
+        "查询任意传播位置时，可同步查看该位置的二维高斯强度分布。"
+    )
+    st.markdown(
+        "**3. 支持一键打印结果**  \n"
+        "在 sidebar 中点击 **打印PDF**，即可将当前参数、透镜信息和输出结果保存为 PDF。"
+    )
+    st.markdown(
+        "**4. 重新整理计算公式说明**  \n"
+        "优化了高斯光束表达式、ABCD 矩阵、q 参数与传播物理图像的说明。"
+    )
 
 
 def main():
     """Streamlit交互式应用"""
-    st.set_page_config(page_title="简化高斯光束计算器", page_icon="🔬", layout="wide")
-    
-    st.title('🔬 简化高斯光束计算器')
-    st.markdown('---')
-    
-    # 显示说明
-    with st.expander("📖 程序说明", expanded=False):
-        # 提供PDF下载链接
-        import os
-        pdf_path = os.path.join(os.path.dirname(__file__), "DerivationofGaussionBeam.pdf")
-        if os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as pdf_file:
-                st.download_button(
-                    label="📄下载高斯光束推导PDF",
-                    data=pdf_file,
-                    file_name="DerivationofGaussionBeam.pdf",
-                    mime="application/pdf"
-                )
-        st.markdown("""
-        ## 计算原理
-        
-        本程序基于 **复曲率半径q参数** 和 **ABCD矩阵** 方法计算高斯光束在光学系统中的传播。
-        
-        ---
-        
-        ### 1️⃣ q参数定义
-        
-        高斯光束在任意位置 z 的状态可用复数 q 参数完整描述：
-        
-        $$q(z) = z - z_0 + i z_R$$
-        
-        其中：
-        - $z_0$：束腰位置（本程序固定为 0）
-        - $z_R = \\frac{\\pi w_0^2 M^2}{\\lambda}$：瑞利长度
-        - $w_0$：束腰半径
-        - $M^2$：光束质量因子
-        
-        **简化形式**（束腰在原点）：
-        $$q(z) = z + i z_R$$
-        
-        **发散角**（远场半角）：
-        $$\\theta = \\frac{\\lambda M^2}{\\pi w_0}$$
-        
-        ---
-        
-        ### 2️⃣ ABCD矩阵变换
-        
-        光学元件对q参数的作用通过ABCD矩阵表示：
-        
-        $$q_{out} = \\frac{A q_{in} + B}{C q_{in} + D}$$
-        
-        **自由空间传播距离 d：**
-        
-        $M_{\\text{propagation}} = \\begin{pmatrix}1 & d\\\\0 & 1\\end{pmatrix}$
-        
-        **薄透镜焦距 f：**
-        
-        $M_{\\text{lens}} = \\begin{pmatrix}1 & 0\\\\-1/f & 1\\end{pmatrix}$
-        
-        - **凸透镜**（会聚）：$f > 0$
-        - **凹透镜**（发散）：$f < 0$
-        
-        ---
-        
-        ### 3️⃣ 光束参数解耦
-        
-        从q参数提取物理量（光斑半径w 和 波前曲率半径R）：
-        
-        $$\\frac{1}{q} = \\frac{1}{R(z)} - i\\frac{\\lambda}{\\pi w^2(z)}$$
-        
-        **求解步骤**：
-        
-        1. 计算 $\\frac{1}{q}$ 的实部和虚部：
-           $$\\text{Re}\\left(\\frac{1}{q}\\right) = \\frac{1}{R(z)}, \\quad \\text{Im}\\left(\\frac{1}{q}\\right) = -\\frac{\\lambda}{\\pi w^2(z)}$$
-        
-        2. 提取光斑半径：
-           $$w(z) = \\sqrt{-\\frac{\\lambda}{\\pi \\cdot \\text{Im}(1/q)}}$$
-        
-        3. 提取曲率半径：
-           $$R(z) = \\frac{1}{\\text{Re}(1/q)}$$
-           
-           特殊情况：当 $\\text{Re}(1/q) \\approx 0$ 时，$R(z) \\to \\infty$（平面波）
-        
-        ---
-        
-        ### 4️⃣ 计算流程
-        
-        1. **初始化**：在束腰处 $q_0 = 0 + i z_R$
-        2. **传播到第一个透镜**：应用传播矩阵 $q_1 = q_0 + d_1$
-        3. **通过透镜**：应用透镜矩阵 $q_2 = \\frac{q_1}{1 - q_1/f}$
-        4. **继续传播**：重复步骤2-3直到目标位置
-        5. **解耦参数**：从最终的 $q$ 提取 $w$ 和 $R$
-        
-        ---
-        
-        ### 🔧 简化假设
-        
-        - 束腰固定在 **z = 0** 处
-        - 仅考虑 **薄透镜**（厚度忽略不计）
-        - 傍轴近似（小角度传播）
-        """)
+    st.set_page_config(page_title="高斯光束计算器V2.0", layout="wide")
+    inject_print_styles()
+
+    title_left, title_center, title_right = st.columns([1, 6, 1], vertical_alignment="center")
+    with title_center:
+        st.markdown(
+            "<h1 style='text-align:center;margin:0;"
+            "font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;"
+            "font-weight:650;letter-spacing:0'>高斯光束计算器</h1>",
+            unsafe_allow_html=True,
+        )
+    with title_right:
+        notes_col, help_col = st.columns(2)
+        with notes_col:
+            if st.button("💡", key="update_notes_btn"):
+                show_update_notes()
+        with help_col:
+            if st.button("📖", key="program_notes_btn"):
+                show_program_notes()
+    st.markdown(
+        "<hr style='margin:0.35rem 0 0.45rem;border:0;border-top:1px solid #d8dee4;'>",
+        unsafe_allow_html=True,
+    )
     
     # 侧边栏: 光束参数
     st.sidebar.header('光束参数')
@@ -127,8 +459,7 @@ def main():
         min_value=200.0,
         max_value=2000.0,
         value=532.0,
-        step=1.0,
-        help='常用激光波长：532nm(绿光), 1064nm(红外)'
+        step=1.0
     )
     wavelength = wavelength_nm * 1e-9
     
@@ -240,6 +571,18 @@ def main():
             key=f'lens_pos_{i}'
         )
         lens_position = lens_position_cm * 1e-2  # cm -> m
+
+        lens_axis_label = st.sidebar.selectbox(
+            '透镜类型 / 作用方向',
+            ['普通薄透镜（X/Y）', '柱透镜（仅作用X方向）', '柱透镜（仅作用Y方向）'],
+            key=f'lens_axis_{i}',
+            help='这里的X/Y表示焦度作用方向，不是柱透镜的几何轴向'
+        )
+        lens_axis = {
+            '普通薄透镜（X/Y）': 'both',
+            '柱透镜（仅作用X方向）': 'x',
+            '柱透镜（仅作用Y方向）': 'y'
+        }[lens_axis_label]
         
         focal_length_mm = st.sidebar.number_input(
             f'焦距 f (mm)',
@@ -253,6 +596,9 @@ def main():
         
         # 根据焦距符号自动判断透镜类型
         focal_length = focal_length_mm * 1e-3  # mm -> m
+        if focal_length == 0:
+            st.sidebar.warning(f'透镜 {i+1} 的焦距不能为 0，当前已跳过。')
+            continue
         if focal_length > 0:
             lens_type_key = 'converging'
         elif focal_length < 0:
@@ -263,11 +609,14 @@ def main():
         lens_list.append({
             'position': lens_position,
             'f': focal_length,
-            'type': lens_type_key
+            'type': lens_type_key,
+            'axis': lens_axis
         })
     
     # 按位置排序透镜
     lens_list.sort(key=lambda x: x['position'])
+    lens_list_x = filter_lenses_by_direction(lens_list, 'x')
+    lens_list_y = filter_lenses_by_direction(lens_list, 'y')
     
     # 侧边栏: 传播距离
     st.sidebar.markdown('---')
@@ -276,85 +625,46 @@ def main():
     z_max_cm = st.sidebar.number_input(
         '最大传播距离 (cm)',
         min_value=1.0,
-        max_value=1000.0,
+        max_value=2000.0,
         value=50.0,
         step=1.0
     )
     z_max = z_max_cm * 1e-2
+
+    st.sidebar.markdown('---')
+    with st.sidebar:
+        render_print_button()
+
+    render_print_summary(
+        wavelength_nm,
+        waist_position_x_cm,
+        waist_diameter_x_mm,
+        M2_x,
+        beam_x,
+        waist_position_y_cm,
+        waist_diameter_y_mm,
+        M2_y,
+        beam_y,
+        lens_list,
+        lens_list_x,
+        lens_list_y,
+        z_max_cm,
+    )
     
     # 绘制二维光束包络图
-    st.markdown('---')
-    
     with st.spinner('正在生成包络图...'):
         fig_envelope = plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max)
-        st.plotly_chart(fig_envelope, width='stretch')
-    
-    # 绘制曲率演化图
-    st.markdown('---')
-    
-    # 添加切换按钮选择X或Y方向
-    direction = st.radio(
-        '选择显示方向',
-        ['X方向', 'Y方向'],
-        horizontal=True,
-        help='切换显示X或Y方向的波前曲率演化'
-    )
-    
-    with st.spinner('正在生成曲率图...'):
-        if direction == 'X方向':
-            fig_curvature = plot_curvature_interactive(beam_x, lens_list, z_max, direction='X')
-        else:
-            fig_curvature = plot_curvature_interactive(beam_y, lens_list, z_max, direction='Y')
-        st.plotly_chart(fig_curvature, width='stretch')
-    
-    # 特定位置光斑参数查询
-    st.markdown('---')
-    st.header('📍 特定位置光斑参数查询')
-    
-    z_query_input = st.text_input(
-        '输入查询位置 (cm)，多个位置用逗号分隔',
-        value='10, 20, 30',
-        help='例如: 10, 20, 30'
-    )
-    
-    if z_query_input:
-        try:
-            z_positions_cm = [float(z.strip()) for z in z_query_input.split(',')]
-            z_positions = [z * 1e-2 for z in z_positions_cm]  # cm -> m
-            
-            # 创建查询结果表格
-            query_data = []
-            for z_cm, z_m in zip(z_positions_cm, z_positions):
-                w_x, R_x = calculate_beam_at_position(beam_x, lens_list, z_m)
-                w_y, R_y = calculate_beam_at_position(beam_y, lens_list, z_m)
-                
-                # 处理无穷大的曲率半径
-                R_x_str = '∞' if np.isinf(R_x) or np.abs(R_x) > z_max * 10 else f'{R_x:.4f}'
-                R_y_str = '∞' if np.isinf(R_y) or np.abs(R_y) > z_max * 10 else f'{R_y:.4f}'
-                
-                query_data.append({
-                    'z位置 (cm)': f'{z_cm:.2f}',
-                    'w_x (mm)': f'{w_x * 1e3:.4f}',
-                    'R_x (m)': R_x_str,
-                    'w_y (mm)': f'{w_y * 1e3:.4f}',
-                    'R_y (m)': R_y_str
-                })
-            
-            import pandas as pd
-            df_query = pd.DataFrame(query_data)
-            st.dataframe(df_query, use_container_width=True)
-            
-        except ValueError:
-            st.error('请输入有效的数字，多个位置用逗号分隔')
+        st.plotly_chart(fig_envelope, use_container_width=True)
     
     # 各区域高斯光束参数
+    st.markdown('<div class="print-page-break"></div>', unsafe_allow_html=True)
     st.markdown('---')
     st.header('🔍 各区域高斯光束参数')
-    st.markdown(f'**{len(lens_list)}个透镜将空间分为{len(lens_list) + 1}个区域，每个区域都有独立的高斯光束参数**')
+    st.markdown(f'**X方向受{len(lens_list_x)}个透镜影响，Y方向受{len(lens_list_y)}个透镜影响；每个方向按其有效透镜独立分区。**')
     
     # 计算X和Y方向的区域信息
-    regions_x = calculate_beam_regions(beam_x, lens_list)
-    regions_y = calculate_beam_regions(beam_y, lens_list)
+    regions_x = calculate_beam_regions(beam_x, lens_list_x)
+    regions_y = calculate_beam_regions(beam_y, lens_list_y)
     
     col_x, col_y = st.columns(2)
     
@@ -400,6 +710,81 @@ def main():
         
         df_region_y = pd.DataFrame(region_data_y)
         st.dataframe(df_region_y, use_container_width=True)
+
+    # 特定位置光斑参数查询
+    st.markdown('---')
+    st.header('📍 特定位置光斑参数查询')
+
+    z_query_input = st.text_input(
+        '输入查询位置 (cm)，多个位置用逗号分隔',
+        value='10, 20, 30',
+        help='例如: 10, 20, 30'
+    )
+
+    if z_query_input:
+        try:
+            z_positions_cm = [float(z.strip()) for z in z_query_input.split(',')]
+            z_positions = [z * 1e-2 for z in z_positions_cm]  # cm -> m
+
+            # 创建查询结果表格
+            query_data = []
+            spot_data = []
+            for z_cm, z_m in zip(z_positions_cm, z_positions):
+                w_x, R_x = calculate_beam_at_position(beam_x, lens_list_x, z_m)
+                w_y, R_y = calculate_beam_at_position(beam_y, lens_list_y, z_m)
+
+                # 处理无穷大的曲率半径
+                R_x_str = '∞' if np.isinf(R_x) or np.abs(R_x) > z_max * 10 else f'{R_x:.4f}'
+                R_y_str = '∞' if np.isinf(R_y) or np.abs(R_y) > z_max * 10 else f'{R_y:.4f}'
+
+                query_data.append({
+                    'z位置 (cm)': f'{z_cm:.2f}',
+                    'w_x (mm)': f'{w_x * 1e3:.4f}',
+                    'R_x (m)': R_x_str,
+                    'w_y (mm)': f'{w_y * 1e3:.4f}',
+                    'R_y (m)': R_y_str
+                })
+                spot_data.append({
+                    'z_cm': z_cm,
+                    'w_x': w_x,
+                    'w_y': w_y
+                })
+
+            import pandas as pd
+            df_query = pd.DataFrame(query_data)
+            st.dataframe(df_query, use_container_width=True)
+
+            st.subheader('2D光斑强度分布')
+            spot_extent_mm = 3 * max(
+                max(item['w_x'], item['w_y']) * 1e3 for item in spot_data
+            )
+            fig_spots = plot_spot_intensity_row_interactive(
+                spot_data,
+                extent_mm=spot_extent_mm
+            )
+            st.plotly_chart(fig_spots, use_container_width=True)
+
+        except ValueError:
+            st.error('请输入有效的数字，多个位置用逗号分隔')
+
+    # 绘制曲率演化图
+    st.markdown('<div class="print-page-break"></div>', unsafe_allow_html=True)
+    st.markdown('---')
+
+    # 添加切换按钮选择X或Y方向
+    direction = st.radio(
+        '选择显示方向',
+        ['X方向', 'Y方向'],
+        horizontal=True,
+        help='切换显示X或Y方向的波前曲率演化'
+    )
+
+    with st.spinner('正在生成曲率图...'):
+        if direction == 'X方向':
+            fig_curvature = plot_curvature_interactive(beam_x, lens_list, z_max, direction='X')
+        else:
+            fig_curvature = plot_curvature_interactive(beam_y, lens_list, z_max, direction='Y')
+        st.plotly_chart(fig_curvature, use_container_width=True)
 
 
 if __name__ == '__main__':

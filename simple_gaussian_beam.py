@@ -202,6 +202,28 @@ class SimpleGaussianBeam:
         return w, R
 
 
+def lens_affects_direction(lens, direction):
+    """Return whether a lens affects the requested transverse direction."""
+    axis = str(lens.get('axis', 'both')).lower()
+    direction_key = str(direction).lower()
+    return axis in ('both', 'xy', 'all') or axis == direction_key
+
+
+def filter_lenses_by_direction(lens_list, direction):
+    """Filter spherical/cylindrical lenses for one transverse direction."""
+    return [lens for lens in lens_list if lens_affects_direction(lens, direction)]
+
+
+def lens_axis_label(lens):
+    """Readable label for the lens active axis."""
+    axis = str(lens.get('axis', 'both')).lower()
+    if axis == 'x':
+        return '仅作用X'
+    if axis == 'y':
+        return '仅作用Y'
+    return 'X/Y'
+
+
 def calculate_beam_at_position(beam, lens_list, z_target):
     """
     计算在目标位置z_target处的光束参数（光斑半径和曲率半径）
@@ -562,14 +584,16 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
     # 创建z轴数组
     z_points_m = np.linspace(0, z_max, 2000)
     z_points = z_points_m * 1e2  # 转换为cm
+    lens_list_x = filter_lenses_by_direction(lens_list, 'x')
+    lens_list_y = filter_lenses_by_direction(lens_list, 'y')
     
     # 计算X和Y方向每个位置的光束半径
     w_x_values = []
     w_y_values = []
     
     for z_m in z_points_m:
-        w_x, _ = calculate_beam_at_position(beam_x, lens_list, z_m)
-        w_y, _ = calculate_beam_at_position(beam_y, lens_list, z_m)
+        w_x, _ = calculate_beam_at_position(beam_x, lens_list_x, z_m)
+        w_y, _ = calculate_beam_at_position(beam_y, lens_list_y, z_m)
         w_x_values.append(w_x * 1e3)  # 转换为mm
         w_y_values.append(w_y * 1e3)  # 转换为mm
     
@@ -618,7 +642,8 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
         mode='lines',
         name='X Direction (Lower)',
         line=dict(color='blue', width=2),
-        hovertemplate='z: %{x:.2f} cm<br>w_x: %{y:.4f} mm<extra></extra>'
+        customdata=w_x_values,
+        hovertemplate='z: %{x:.2f} cm<br>w_x: %{customdata:.4f} mm<extra></extra>'
     ))
     
     # 标记束腰位置
@@ -650,56 +675,59 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
         else:
             lens_type = 'Concave'
             lens_color = 'rgba(30, 144, 255, 0.9)'
+        axis_label = lens_axis_label(lens)
+        affects_x = lens_affects_direction(lens, 'x')
+        affects_y = lens_affects_direction(lens, 'y')
         
-        # 获取透镜位置的光束半径（取X和Y的最大值）
-        w_x_at_lens, _ = calculate_beam_at_position(beam_x, lens_list, lens['position'])
-        w_y_at_lens, _ = calculate_beam_at_position(beam_y, lens_list, lens['position'])
-        lens_height = max(w_x_at_lens, w_y_at_lens) * 1e3 * 1.5
+        # 获取透镜位置的光束半径；柱透镜只在实际作用的半轴上画出。
+        w_x_at_lens, _ = calculate_beam_at_position(beam_x, lens_list_x, lens['position'])
+        w_y_at_lens, _ = calculate_beam_at_position(beam_y, lens_list_y, lens['position'])
+        lens_height_x = w_x_at_lens * 1e3 * 1.5
+        lens_height_y = w_y_at_lens * 1e3 * 1.5
+        if affects_x and affects_y:
+            lens_y_span = [-lens_height_x, lens_height_y]
+        elif affects_x:
+            lens_y_span = [-lens_height_x, 0]
+        elif affects_y:
+            lens_y_span = [0, lens_height_y]
+        else:
+            continue
         
         # 绘制透镜竖线
         fig.add_trace(go.Scatter(
             x=[lens['position'] * 1e2, lens['position'] * 1e2],
-            y=[-lens_height, lens_height],
+            y=lens_y_span,
             mode='lines',
-            name=f"{lens_type} (f={lens['f']*1e3:.0f}mm)",
+            name=f"{lens_type} {axis_label} (f={lens['f']*1e3:.0f}mm)",
             line=dict(color=lens_color, width=2),
             showlegend=True,
-            hovertemplate=f"{lens_type}<br>f={lens['f']*1e3:.0f}mm<br>z={lens['position']*1e2:.2f}cm<extra></extra>"
+            hovertemplate=f"{lens_type}<br>{axis_label}<br>f={lens['f']*1e3:.0f}mm<br>z={lens['position']*1e2:.2f}cm<extra></extra>"
         ))
     
-    # 添加区域标注
-    # 先找到整个绘图范围内Y方向的最大半径，用于统一标注高度
+    # 添加区域标注：Y方向标在上半轴，X方向标在下半轴，避免柱透镜时看反。
     z_all_samples = np.linspace(0, z_max, 200)
-    max_w_y_global = 0
+    max_w_x_global = 0.0
+    max_w_y_global = 0.0
     for z_sample in z_all_samples:
-        w_y_sample, _ = calculate_beam_at_position(beam_y, lens_list, z_sample)
-        if w_y_sample > max_w_y_global:
-            max_w_y_global = w_y_sample
-    
-    # 统一的标注高度：在全局最高点上方20%
-    unified_y_pos = max_w_y_global * 1e3 * 1.2
-    
-    regions_x = calculate_beam_regions(beam_x, lens_list)
-    for region_info in regions_x:
-        # 计算区域中心位置（横坐标在区域宽度中间）
-        start_z = region_info['start_z']
-        end_z = region_info['end_z']
-        
-        if np.isinf(end_z):
-            # 如果结束位置是无穷，使用z_max作为结束位置
-            end_z_for_calc = z_max
-        else:
-            end_z_for_calc = end_z
-        
-        center_z = (start_z + end_z_for_calc) / 2
-        
-        # 确保中心位置在绘图范围内
-        if center_z <= z_max:
-            # 添加区域标注文字（纵坐标统一在最上方），横坐标转换为cm
+        w_x_sample, _ = calculate_beam_at_position(beam_x, lens_list_x, z_sample)
+        w_y_sample, _ = calculate_beam_at_position(beam_y, lens_list_y, z_sample)
+        max_w_x_global = max(max_w_x_global, w_x_sample)
+        max_w_y_global = max(max_w_y_global, w_y_sample)
+
+    x_region_y = -max(max_w_x_global * 1e3 * 1.2, 1e-6)
+    y_region_y = max(max_w_y_global * 1e3 * 1.2, 1e-6)
+
+    def add_region_annotations(regions, y_pos, label_prefix):
+        for region_info in regions:
+            start_z = region_info['start_z']
+            end_z = z_max if np.isinf(region_info['end_z']) else region_info['end_z']
+            center_z = (start_z + end_z) / 2
+            if center_z > z_max:
+                continue
             fig.add_annotation(
                 x=center_z * 1e2,
-                y=unified_y_pos,
-                text=f"区域{region_info['region']}",
+                y=y_pos,
+                text=f"{label_prefix}区域{region_info['region']}",
                 showarrow=False,
                 font=dict(size=11, color='rgba(80, 80, 80, 0.5)'),
                 bgcolor='rgba(255, 255, 255, 0.6)',
@@ -707,15 +735,18 @@ def plot_beam_envelope_interactive(beam_x, beam_y, lens_list, z_max):
                 bordercolor='rgba(200, 200, 200, 0.3)',
                 borderwidth=1
             )
+
+    add_region_annotations(calculate_beam_regions(beam_y, lens_list_y), y_region_y, 'Y')
+    add_region_annotations(calculate_beam_regions(beam_x, lens_list_x), x_region_y, 'X')
     
     # 更新布局
     fig.update_layout(
-        title='2D Beam Propagation (Y-axis: upper, X-axis: lower)',
-        xaxis_title='Distance z (cm)',
-        yaxis_title='Radius (mm)',
+        xaxis_title='传播距离 z (cm)',
+        yaxis_title='光斑半径 (mm，X方向向下镜像)',
         hovermode='x unified',
         template='plotly_white',
-        height=500,
+        height=460,
+        margin=dict(l=80, r=30, t=34, b=34),
         showlegend=True
     )
     
@@ -858,57 +889,84 @@ def plot_beam_radius_interactive(beam, lens_list, z_max):
 
 def plot_curvature_interactive(beam, lens_list, z_max, direction='X'):
     """绘制交互式波前曲率演化图"""
-    # 创建z轴数组
-    z_points_m = np.linspace(0, z_max, 2000)
-    z_points = z_points_m * 1e2  # 转换为cm
-    
-    # 计算每个位置的曲率半径
-    R_values = []
-    
-    for z_m in z_points_m:
-        _, R = calculate_beam_at_position(beam, lens_list, z_m)
-        R_values.append(R)
-    
-    R_values = np.array(R_values)
-    
-    # 处理无穷大的曲率半径
-    R_plot = np.copy(R_values)
-    R_plot[np.abs(R_plot) > z_max * 5] = np.nan
-    R_plot[np.isinf(R_plot)] = np.nan
-    
+    # Curvature jumps at thin lenses, so draw each propagation region separately.
+    active_lenses = filter_lenses_by_direction(lens_list, direction)
+    active_positions = sorted(
+        lens['position'] for lens in active_lenses if 0 < lens['position'] < z_max
+    )
+    boundaries = [0.0] + active_positions + [z_max]
+    eps = max(z_max * 1e-6, 1e-9)
+
+    segments = []
+    all_R_values = []
+    points_per_segment = max(80, int(2000 / max(1, len(boundaries) - 1)))
+
+    for idx in range(len(boundaries) - 1):
+        start = boundaries[idx]
+        end = boundaries[idx + 1]
+        segment_start = start + eps if idx > 0 else start
+        segment_end = end - eps if idx < len(boundaries) - 2 else end
+        if segment_end <= segment_start:
+            continue
+
+        z_points_m = np.linspace(segment_start, segment_end, points_per_segment)
+        R_values = []
+        for z_m in z_points_m:
+            _, R = calculate_beam_at_position(beam, active_lenses, z_m)
+            R_values.append(R)
+        R_values = np.array(R_values)
+        segments.append((z_points_m * 1e2, R_values))
+        all_R_values.extend(R_values[np.isfinite(R_values)])
+
+    if all_R_values:
+        finite_abs_R = np.abs(np.array(all_R_values))
+        clip_limit = max(
+            np.nanpercentile(finite_abs_R, 98),
+            z_max * 5,
+            beam.z_R * 5,
+        )
+    else:
+        clip_limit = z_max * 5
+
     # 根据方向选择颜色
     line_color = 'blue' if direction == 'X' else 'red'
     
     # 创建单图
     fig = go.Figure()
     
-    # 添加曲率半径曲线
-    fig.add_trace(
-        go.Scatter(
+    # 添加曲率半径曲线；每段独立绘制，避免薄透镜处错误连线。
+    for idx, (z_points, R_values) in enumerate(segments):
+        R_plot = np.copy(R_values)
+        R_plot[np.abs(R_plot) > clip_limit] = np.nan
+        R_plot[np.isinf(R_plot)] = np.nan
+        fig.add_trace(go.Scatter(
             x=z_points,
             y=R_plot,
             mode='lines',
             name=f'R_{direction.lower()}(z)',
+            showlegend=(idx == 0),
             line=dict(color=line_color, width=2),
             hovertemplate='z: %{x:.2f} cm<br>R: %{y:.4f} m<extra></extra>'
-        )
-    )
+        ))
     
     # 标记透镜位置
-    for lens in lens_list:
+    for lens in sorted(lens_list, key=lambda x: x['position']):
+        is_active = lens_affects_direction(lens, direction)
         if lens['type'] == 'converging':
-            lens_type = 'Convex'
-            lens_color = 'rgba(255, 140, 0, 0.7)'
+            lens_type = '凸透镜'
+            lens_color = 'rgba(255, 140, 0, 0.75)' if is_active else 'rgba(130, 130, 130, 0.45)'
         else:
-            lens_type = 'Concave'
-            lens_color = 'rgba(30, 144, 255, 0.7)'
+            lens_type = '凹透镜'
+            lens_color = 'rgba(30, 144, 255, 0.75)' if is_active else 'rgba(130, 130, 130, 0.45)'
+        axis_label = lens_axis_label(lens)
+        inactive_note = '' if is_active else '<br>本方向无焦度'
         
         fig.add_vline(
             x=lens['position'] * 1e2,
-            line_dash="solid",
+            line_dash="solid" if is_active else "dot",
             line_width=2,
             line_color=lens_color,
-            annotation_text=f"{lens_type}<br>f={lens['f']*1e3:.0f}mm",
+            annotation_text=f"z={lens['position'] * 1e2:.2f}cm<br>{lens_type} {axis_label}{inactive_note}<br>f={lens['f']*1e3:.0f}mm",
             annotation_position="top"
         )
     
@@ -923,6 +981,173 @@ def plot_curvature_interactive(beam, lens_list, z_max, direction='X'):
         plot_bgcolor='white'
     )
     
+    return fig
+
+
+def plot_spot_intensity_interactive(z_cm, w_x, w_y, extent_mm=None, grid_size=151):
+    """Render a normalized astigmatic Gaussian spot at one z position."""
+    w_x_mm = w_x * 1e3
+    w_y_mm = w_y * 1e3
+    if extent_mm is None:
+        extent_mm = 3 * max(w_x_mm, w_y_mm)
+    extent_mm = max(extent_mm, 1e-6)
+
+    x = np.linspace(-extent_mm, extent_mm, grid_size)
+    y = np.linspace(-extent_mm, extent_mm, grid_size)
+    X, Y = np.meshgrid(x, y)
+    intensity = np.exp(-2 * ((X / w_x_mm) ** 2 + (Y / w_y_mm) ** 2))
+
+    fig = go.Figure()
+    fig.add_trace(go.Heatmap(
+        x=x,
+        y=y,
+        z=intensity,
+        zmin=0,
+        zmax=1,
+        colorscale='Jet',
+        colorbar=dict(title='I/I₀', thickness=12),
+        hovertemplate='x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>I/I₀: %{z:.4f}<extra></extra>'
+    ))
+    theta = np.linspace(0, 2 * np.pi, 240)
+    fig.add_trace(go.Scatter(
+        x=w_x_mm * np.cos(theta),
+        y=w_y_mm * np.sin(theta),
+        mode='lines',
+        line=dict(color='white', width=2),
+        hoverinfo='skip',
+        name='1/e²'
+    ))
+
+    fig.update_xaxes(
+        title_text='x (mm)',
+        range=[-extent_mm, extent_mm],
+        constrain='domain'
+    )
+    fig.update_yaxes(
+        title_text='y (mm)',
+        range=[-extent_mm, extent_mm],
+        scaleanchor='x',
+        scaleratio=1
+    )
+    fig.update_layout(
+        title=f'z = {z_cm:.2f} cm · wₓ={w_x_mm:.4f} mm · wᵧ={w_y_mm:.4f} mm',
+        template='plotly_white',
+        height=380,
+        margin=dict(l=50, r=20, t=60, b=45),
+        showlegend=False
+    )
+    return fig
+
+
+def plot_spot_intensity_row_interactive(spot_data, extent_mm=None, grid_size=131):
+    """Render multiple normalized Gaussian spots in a single adaptive row."""
+    if not spot_data:
+        return go.Figure()
+
+    n_spots = len(spot_data)
+    spot_metrics = []
+    max_radius_mm = 0.0
+    for spot in spot_data:
+        w_x_mm = spot['w_x'] * 1e3
+        w_y_mm = spot['w_y'] * 1e3
+        max_radius_mm = max(max_radius_mm, w_x_mm, w_y_mm)
+        spot_metrics.append({
+            'z_cm': spot['z_cm'],
+            'w_x_mm': w_x_mm,
+            'w_y_mm': w_y_mm
+        })
+
+    if extent_mm is None:
+        extent_mm = 3 * max_radius_mm
+    extent_mm = max(extent_mm, 1e-6)
+
+    x = np.linspace(-extent_mm, extent_mm, grid_size)
+    y = np.linspace(-extent_mm, extent_mm, grid_size)
+    X, Y = np.meshgrid(x, y)
+    theta = np.linspace(0, 2 * np.pi, 240)
+
+    subplot_titles = [
+        (
+            f"z={metric['z_cm']:.2f} cm"
+            f"<br>w<sub>x</sub>={metric['w_x_mm']:.4f} mm · "
+            f"w<sub>y</sub>={metric['w_y_mm']:.4f} mm"
+        )
+        for metric in spot_metrics
+    ]
+    spacing = 0.05 if n_spots <= 2 else 0.035 if n_spots <= 4 else 0.022
+    fig = make_subplots(
+        rows=1,
+        cols=n_spots,
+        subplot_titles=subplot_titles,
+        horizontal_spacing=spacing
+    )
+
+    for idx, metric in enumerate(spot_metrics, start=1):
+        intensity = np.exp(-2 * (
+            (X / metric['w_x_mm']) ** 2 + (Y / metric['w_y_mm']) ** 2
+        ))
+        fig.add_trace(
+            go.Heatmap(
+                x=x,
+                y=y,
+                z=intensity,
+                coloraxis='coloraxis',
+                hovertemplate=(
+                    'x: %{x:.4f} mm<br>'
+                    'y: %{y:.4f} mm<br>'
+                    'I/I₀: %{z:.4f}<extra></extra>'
+                )
+            ),
+            row=1,
+            col=idx
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=metric['w_x_mm'] * np.cos(theta),
+                y=metric['w_y_mm'] * np.sin(theta),
+                mode='lines',
+                line=dict(color='white', width=2),
+                hoverinfo='skip',
+                showlegend=False
+            ),
+            row=1,
+            col=idx
+        )
+
+        x_ref = 'x' if idx == 1 else f'x{idx}'
+        fig.update_xaxes(
+            title_text='x (mm)',
+            range=[-extent_mm, extent_mm],
+            constrain='domain',
+            row=1,
+            col=idx
+        )
+        fig.update_yaxes(
+            title_text='y (mm)' if idx == 1 else '',
+            range=[-extent_mm, extent_mm],
+            scaleanchor=x_ref,
+            scaleratio=1,
+            row=1,
+            col=idx
+        )
+
+    title_size = 15 if n_spots <= 3 else 12 if n_spots <= 5 else 10
+    tick_size = 12 if n_spots <= 4 else 10
+    fig.update_annotations(font_size=title_size)
+    fig.update_xaxes(tickfont=dict(size=tick_size), title_font=dict(size=tick_size + 1))
+    fig.update_yaxes(tickfont=dict(size=tick_size), title_font=dict(size=tick_size + 1))
+    fig.update_layout(
+        coloraxis=dict(
+            colorscale='Jet',
+            cmin=0,
+            cmax=1,
+            colorbar=dict(title='I/I₀', thickness=12)
+        ),
+        template='plotly_white',
+        height=390 if n_spots <= 4 else 350,
+        margin=dict(l=45, r=45, t=82, b=42),
+        showlegend=False
+    )
     return fig
 
 
